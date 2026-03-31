@@ -1,0 +1,25 @@
+# Core UI
+streamlit==1.33.0
+
+# LLM via Ollama
+ollama==0.2.1
+
+# Embeddings
+sentence-transformers==2.7.0
+torch==2.3.0
+transformers==4.41.0
+huggingface-hub==0.23.2
+
+# Vector DB
+chromadb==0.4.24
+
+# LangChain (text splitting only)
+langchain==0.2.1
+langchain-community==0.2.1
+langchain-text-splitters==0.2.1
+
+# Document loaders
+pymupdf==1.24.3
+
+# Utilities
+numpy==1.26.4
