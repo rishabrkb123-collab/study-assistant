@@ -11,7 +11,8 @@ transformers==4.41.0
 huggingface-hub==0.23.2
 
 # Vector DB
-chromadb==0.4.24
+# 0.5.x ships pre-built wheels for Python 3.12 on Windows (no C++ compiler needed)
+chromadb==0.5.3
 
 # LangChain (text splitting only)
 langchain==0.2.1

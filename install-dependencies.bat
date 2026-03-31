@@ -76,18 +76,33 @@ call :log OK "PyTorch installed."
 
 :: ============================================================
 ::  6. Install all remaining dependencies
+::     --prefer-binary  → use pre-built wheels, never compile C++
 :: ============================================================
 call :log INFO "Installing remaining dependencies from requirements.txt..."
 echo       (this may take several minutes on first run)
 echo.
-pip install -r requirements.txt --quiet
+pip install -r requirements.txt --prefer-binary --quiet
 if %errorlevel% neq 0 (
-    call :log ERROR "Dependency installation failed."
+    call :log WARN "First attempt failed. Retrying with verbose output to pinpoint the issue..."
     echo.
-    echo   Try running manually for details:
-    echo   pip install -r requirements.txt
-    echo.
-    goto :fail
+    pip install -r requirements.txt --prefer-binary
+    if !errorlevel! neq 0 (
+        call :log ERROR "Dependency installation failed."
+        echo.
+        echo  --------------------------------------------------------
+        echo   Common cause on Windows: a package tried to compile
+        echo   C++ source because no pre-built wheel was available.
+        echo.
+        echo   Fix: install Microsoft C++ Build Tools (free):
+        echo   https://visualstudio.microsoft.com/visual-cpp-build-tools/
+        echo   - Run the installer
+        echo   - Select  "Desktop development with C++"
+        echo   - Click Install  (needs ~6 GB, takes ~10 min)
+        echo   - Re-run this installer afterward
+        echo  --------------------------------------------------------
+        echo.
+        goto :fail
+    )
 )
 call :log OK "All dependencies installed."
 

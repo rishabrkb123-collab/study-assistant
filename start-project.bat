@@ -39,7 +39,7 @@ python -c "import streamlit" >nul 2>&1
 if %errorlevel% neq 0 (
     call :log WARN "Dependencies not installed. Launching installer now..."
     echo.
-    call install-dependencies.bat
+    call "%~dp0install-dependencies.bat"
     if !errorlevel! neq 0 (
         call :log ERROR "Installer failed. Cannot start."
         goto :fail
