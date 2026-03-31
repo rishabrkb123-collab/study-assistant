@@ -1,237 +1,246 @@
 @echo off
 setlocal enabledelayedexpansion
-
-:: ============================================================
-::  KEEP WINDOW OPEN: re-launch inside a persistent cmd session
-::  so the window never closes automatically on error.
-:: ============================================================
-if "%~1"=="--child" goto :main
-cmd /k ""%~f0" --child"
-exit
-
-:main
 cd /d "%~dp0"
 title Study Assistant -- Dependency Installer
 
-:: Log file for this run (always written, survives window close)
-set LOGFILE=%~dp0install.log
-echo. > "%LOGFILE%"
-call :log INFO "Log file: %LOGFILE%"
+:: ================================================================
+::  ANSI colour codes  (set up once; no PowerShell spawn per line)
+::  Works on Windows 10 / 11.  Falls back to plain text silently.
+:: ================================================================
+for /f "delims=" %%e in ('powershell -NoProfile -Command "[char]27"') do set "ESC=%%e"
+set "GREEN=!ESC![92m" & set "CYAN=!ESC![96m" & set "YELLOW=!ESC![93m"
+set "RED=!ESC![91m"   & set "BOLD=!ESC![1m"  & set "R=!ESC![0m"
 
-call :print_header
+:: ================================================================
+::  Log file (written even if window closes)
+:: ================================================================
+set "LOGFILE=%~dp0install.log"
+echo Install started: %DATE% %TIME% > "%LOGFILE%"
 
-:: ============================================================
-::  1. Python check
-:: ============================================================
-call :log INFO "Checking Python..."
+:: ================================================================
+::  Header
+:: ================================================================
+cls
+echo.
+echo %BOLD%  ===========================================================%R%
+echo %BOLD%         STUDY ASSISTANT -- Dependency Installer%R%
+echo %BOLD%  ===========================================================%R%
+echo.
+
+:: ================================================================
+::  1.  Python
+:: ================================================================
+call :info "Checking Python..."
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    call :log ERROR "Python not found in PATH."
+if !errorlevel! neq 0 (
+    call :error "Python not found in PATH."
     echo.
-    echo   Install Python 3.10+ from https://www.python.org/downloads/
-    echo   IMPORTANT: tick  [v] Add Python to PATH  during install.
+    echo   Install Python 3.10+ from: https://www.python.org/downloads/
+    echo   IMPORTANT -- tick  [v] Add Python to PATH  during install.
     goto :fail
 )
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do (
-    set PY_VER=%%v
-    echo   %%v >> "%LOGFILE%"
-)
-call :log OK "%PY_VER% detected."
+:: Use tokens=2 to grab only "3.x.y" — avoids capturing a trailing ^M
+for /f "tokens=2" %%v in ('python --version 2^>^&1') do set "PY_NUM=%%v"
+call :ok "Python !PY_NUM! detected."
 
-:: ============================================================
-::  2. Create / reuse virtual environment
-:: ============================================================
+:: ================================================================
+::  2.  Virtual environment
+:: ================================================================
 if exist ".venv\Scripts\python.exe" (
-    call :log OK "Virtual environment (.venv) already exists."
+    call :ok "Virtual environment (.venv) already exists."
 ) else (
-    call :log INFO "Creating virtual environment (.venv) ..."
+    call :info "Creating virtual environment (.venv)..."
     python -m venv .venv >> "%LOGFILE%" 2>&1
     if !errorlevel! neq 0 (
-        call :log ERROR "Failed to create venv. See %LOGFILE%"
+        call :error "Could not create .venv -- see install.log"
         goto :fail
     )
-    call :log OK "Virtual environment created."
+    call :ok "Virtual environment created."
 )
 
-:: ============================================================
-::  3. Activate
-:: ============================================================
-call :log INFO "Activating virtual environment..."
+:: ================================================================
+::  3.  Activate
+:: ================================================================
+call :info "Activating virtual environment..."
 call ".venv\Scripts\activate.bat"
-if %errorlevel% neq 0 (
-    call :log ERROR "Could not activate .venv."
+if !errorlevel! neq 0 (
+    call :error "Could not activate .venv."
     goto :fail
 )
-call :log OK "Virtual environment active."
+call :ok "Virtual environment activated."
 
-:: ============================================================
-::  4. Upgrade pip  (silent — almost never fails)
-:: ============================================================
-call :log INFO "Upgrading pip..."
+:: ================================================================
+::  4.  Upgrade pip
+:: ================================================================
+call :info "Upgrading pip..."
 python -m pip install --upgrade pip --quiet >> "%LOGFILE%" 2>&1
-call :log OK "pip upgraded."
+call :ok "pip up to date."
 
-:: ============================================================
-::  5. PyTorch — CPU wheel first (saves ~1.5 GB)
-:: ============================================================
-call :log INFO "Installing PyTorch CPU wheel..."
-echo   (downloading ~200 MB — please wait)
-pip install "torch>=2.1.0" --index-url https://download.pytorch.org/whl/cpu --prefer-binary >> "%LOGFILE%" 2>&1
-if %errorlevel% neq 0 (
-    call :log WARN "CPU wheel failed. Falling back to default PyPI torch..."
-    pip install "torch>=2.1.0" --prefer-binary >> "%LOGFILE%" 2>&1
+:: ================================================================
+::  5.  PyTorch CPU  (install before requirements.txt so
+::      sentence-transformers does not pull the large CUDA wheel)
+:: ================================================================
+call :info "Installing PyTorch (CPU build -- ~200 MB vs ~2 GB CUDA)..."
+pip install "torch>=2.1.0" --index-url https://download.pytorch.org/whl/cpu --prefer-binary --quiet >> "%LOGFILE%" 2>&1
+if !errorlevel! neq 0 (
+    call :warn "CPU wheel unavailable -- falling back to default PyPI torch..."
+    pip install "torch>=2.1.0" --prefer-binary --quiet >> "%LOGFILE%" 2>&1
     if !errorlevel! neq 0 (
-        call :log ERROR "PyTorch install failed. See %LOGFILE%"
+        call :error "PyTorch install failed -- see install.log"
         goto :fail
     )
 )
-call :log OK "PyTorch installed."
+call :ok "PyTorch installed."
 
-:: ============================================================
-::  6. Main dependencies
-::     --prefer-binary  — never compile C++ from source
-::     No --quiet       — errors are visible AND logged
-:: ============================================================
-call :log INFO "Installing dependencies from requirements.txt ..."
-echo   (first run may take 5-15 minutes)
+:: ================================================================
+::  6.  Main dependencies
+::      Output goes to temp log AND the screen simultaneously
+::      via a two-pass: run→log, then type the log.
+:: ================================================================
+call :info "Installing dependencies from requirements.txt..."
+echo   (first run: 5-15 min depending on internet speed)
 echo.
 
-:: Redirect pip output to a temp file, then print it so the user sees it.
-:: This lets us grep the output afterward without running pip twice.
-set PIP_TMP=%TEMP%\sa_pip_install.log
-pip install -r requirements.txt --prefer-binary > "%PIP_TMP%" 2>&1
-set PIP_EXIT=!errorlevel!
+set "PIP_LOG=%TEMP%\sa_pip_%RANDOM%.log"
+pip install -r requirements.txt --prefer-binary > "!PIP_LOG!" 2>&1
+set "PIP_RC=!errorlevel!"
 
-:: Show what pip printed
-type "%PIP_TMP%"
-:: Append to persistent log
-type "%PIP_TMP%" >> "%LOGFILE%"
-
+:: Print pip's full output so the user can see it
+type "!PIP_LOG!"
+type "!PIP_LOG!" >> "%LOGFILE%"
 echo.
-if !PIP_EXIT! neq 0 (
-    call :log WARN "pip exited with code !PIP_EXIT!. Diagnosing..."
+
+if !PIP_RC! neq 0 (
+    call :warn "pip finished with errors (code !PIP_RC!). Diagnosing..."
     echo.
 
-    :: ---- Detect C++ build-tools error ----
-    findstr /i "Microsoft Visual C++" "%PIP_TMP%" >nul 2>&1
+    findstr /i "Microsoft Visual C++" "!PIP_LOG!" >nul 2>&1
     if !errorlevel! == 0 (
-        call :log ERROR "A package requires C++ compilation — no pre-built wheel available."
+        call :error "A package needs to be compiled from C++ source."
         echo.
-        echo  --------------------------------------------------------
-        echo   FIX: Install Microsoft C++ Build Tools (free, ~6 GB)
+        echo  !BOLD!  FIX -- install Microsoft C++ Build Tools (free, ~6 GB):!R!
         echo.
-        echo   1. Go to:
-        echo      https://visualstudio.microsoft.com/visual-cpp-build-tools/
-        echo   2. Download and run the installer
-        echo   3. Select  "Desktop development with C++"
-        echo   4. Click Install  (takes ~10 min, needs reboot)
-        echo   5. Re-run this installer
-        echo  --------------------------------------------------------
-        del "%PIP_TMP%" >nul 2>&1
+        echo    1.  https://visualstudio.microsoft.com/visual-cpp-build-tools/
+        echo    2.  Run the installer
+        echo    3.  Select  "Desktop development with C++"
+        echo    4.  Click Install  (10-15 min)
+        echo    5.  Reboot, then run this installer again
+        echo.
+        del "!PIP_LOG!" >nul 2>&1
         goto :fail
     )
 
-    :: ---- Detect version-conflict error ----
-    findstr /i "ResolutionImpossible\|conflict\|incompatible" "%PIP_TMP%" >nul 2>&1
+    findstr /i "ResolutionImpossible\|Cannot install\|conflict\|incompatible" "!PIP_LOG!" >nul 2>&1
     if !errorlevel! == 0 (
-        call :log ERROR "pip could not resolve package versions."
+        call :error "Package version conflict detected."
         echo.
-        echo   Try deleting .venv and running this installer again:
+        echo   Fix: delete .venv and re-run this script:
         echo     rmdir /s /q .venv
-        del "%PIP_TMP%" >nul 2>&1
+        echo     install-dependencies.bat
+        del "!PIP_LOG!" >nul 2>&1
         goto :fail
     )
 
-    :: ---- Generic failure ----
-    call :log ERROR "Installation failed. Full log: %LOGFILE%"
-    echo   Scroll up — the first red 'error:' line shows the cause.
-    del "%PIP_TMP%" >nul 2>&1
+    call :error "Installation failed -- check install.log for details."
+    echo   Scroll up to find the first  'ERROR' / 'error:'  line.
+    del "!PIP_LOG!" >nul 2>&1
     goto :fail
 )
 
-del "%PIP_TMP%" >nul 2>&1
-call :log OK "All packages installed."
+del "!PIP_LOG!" >nul 2>&1
+call :ok "All packages installed."
 
-:: ============================================================
-::  7. Verify imports
-:: ============================================================
-call :log INFO "Verifying imports..."
+:: ================================================================
+::  7.  Verify imports
+:: ================================================================
+call :info "Verifying key imports..."
 python -c "import streamlit, chromadb, ollama, fitz, sentence_transformers" >> "%LOGFILE%" 2>&1
-if %errorlevel% neq 0 (
-    call :log WARN "Import check failed. Details:"
-    python -c "import streamlit, chromadb, ollama, fitz, sentence_transformers"
+if !errorlevel! neq 0 (
+    call :warn "One or more packages failed to import. Running diagnostic..."
     echo.
-    echo   ^ Fix any missing package shown above, then re-run this script.
-) else (
-    call :log OK "All imports verified."
+    for %%p in (streamlit chromadb ollama fitz sentence_transformers) do (
+        python -c "import %%p" >nul 2>&1
+        if !errorlevel! neq 0 (
+            call :error "  MISSING: %%p"
+        ) else (
+            call :ok   "  OK:      %%p"
+        )
+    )
+    echo.
+    echo   Re-run this installer after fixing the missing package(s).
+    goto :fail
 )
+call :ok "All imports verified."
 
-:: ============================================================
-::  8. Ollama check
-:: ============================================================
+:: ================================================================
+::  8.  Ollama check
+:: ================================================================
 echo.
-call :log INFO "Checking Ollama..."
+call :info "Checking Ollama..."
 where ollama >nul 2>&1
-if %errorlevel% neq 0 (
-    call :log WARN "Ollama not found in PATH."
+if !errorlevel! neq 0 (
+    call :warn "Ollama not found in PATH."
     echo.
     echo   Install: https://ollama.com/download
     echo   Then:    ollama pull llama3.1:8b
 ) else (
-    call :log OK "Ollama found."
+    call :ok "Ollama is installed."
     powershell -NoProfile -Command ^
-        "try{$r=Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 3 -EA Stop;if($r.models.name -like '*llama3.1*'){exit 0}else{exit 2}}catch{exit 1}" >nul 2>&1
+      "try{$r=Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 3 -EA Stop;if($r.models.name -like '*llama3.1*'){exit 0}else{exit 2}}catch{exit 1}" >nul 2>&1
     if !errorlevel! == 0 (
-        call :log OK "Model llama3.1:8b already pulled."
+        call :ok "Model llama3.1:8b is available."
     ) else if !errorlevel! == 2 (
-        call :log WARN "Model not pulled yet. Run:  ollama pull llama3.1:8b"
+        call :warn "Model not pulled yet.  Run:  ollama pull llama3.1:8b"
     ) else (
-        call :log INFO "Ollama not running — model check skipped."
+        call :info "Ollama not running (model check skipped)."
         echo         After starting Ollama run:  ollama pull llama3.1:8b
     )
 )
 
-:: ============================================================
+:: ================================================================
 ::  Done
-:: ============================================================
+:: ================================================================
 echo.
-echo  ==========================================================
-echo   SUCCESS!  All dependencies installed.
-echo   Next: double-click  start-project.bat  to launch the app.
-echo  ==========================================================
+echo %BOLD%  ===========================================================%R%
+echo %GREEN%%BOLD%   SUCCESS!  All dependencies installed.%R%
+echo    Next: double-click  start-project.bat  to launch the app.
+echo %BOLD%  ===========================================================%R%
 echo.
-pause
-exit /b 0
+goto :end
 
 :fail
 echo.
-echo  ==========================================================
-echo   FAILED.  Full install log saved to:
-echo   %LOGFILE%
-echo  ==========================================================
+echo %BOLD%  ===========================================================%R%
+echo %RED%%BOLD%   INSTALLATION FAILED.%R%
+echo    Full log: %LOGFILE%
+echo %BOLD%  ===========================================================%R%
 echo.
-pause
-exit /b 1
 
-:: ============================================================
-::  Helpers
-:: ============================================================
-:print_header
-cls
-echo  ==========================================================
-echo.
-echo        STUDY ASSISTANT -- Dependency Installer
-echo.
-echo  ==========================================================
-echo.
+:end
+echo Press any key to close this window...
+pause >nul
+exit /b
+
+:: ================================================================
+::  Subroutines  (all must end with goto :eof)
+:: ================================================================
+
+:ok
+echo %GREEN%  [ OK    ]%R% %~1
+echo [OK] %~1 >> "%LOGFILE%"
 goto :eof
 
-:log
-set "_lvl=%~1"
-set "_msg=%~2"
-echo [%_lvl%] %_msg% >> "%LOGFILE%"
-if /i "%_lvl%"=="OK"    powershell -NoProfile -Command "Write-Host '  [ OK    ] ' -NoNewline -ForegroundColor Green;  Write-Host '%_msg%'"
-if /i "%_lvl%"=="INFO"  powershell -NoProfile -Command "Write-Host '  [ INFO  ] ' -NoNewline -ForegroundColor Cyan;   Write-Host '%_msg%'"
-if /i "%_lvl%"=="WARN"  powershell -NoProfile -Command "Write-Host '  [ WARN  ] ' -NoNewline -ForegroundColor Yellow; Write-Host '%_msg%'"
-if /i "%_lvl%"=="ERROR" powershell -NoProfile -Command "Write-Host '  [ ERROR ] ' -NoNewline -ForegroundColor Red;    Write-Host '%_msg%'"
+:info
+echo %CYAN%  [ INFO  ]%R% %~1
+echo [INFO] %~1 >> "%LOGFILE%"
+goto :eof
+
+:warn
+echo %YELLOW%  [ WARN  ]%R% %~1
+echo [WARN] %~1 >> "%LOGFILE%"
+goto :eof
+
+:error
+echo %RED%  [ ERROR ]%R% %~1
+echo [ERROR] %~1 >> "%LOGFILE%"
 goto :eof
