@@ -3,209 +3,219 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title Study Assistant -- Starting Up
 
-call :print_header
+:: ── ANSI colours (one PowerShell call; never spawned per log line) ───────────
+for /f "delims=" %%e in ('powershell -NoProfile -Command "[char]27"') do set "ESC=%%e"
+set "GREEN=%ESC%[92m"
+set "CYAN=%ESC%[96m"
+set "YELLOW=%ESC%[93m"
+set "RED=%ESC%[91m"
+set "BOLD=%ESC%[1m"
+set "R=%ESC%[0m"
 
-:: ============================================================
-::  1. Verify Python
-:: ============================================================
-call :log INFO "Checking Python..."
+cls
+echo.
+echo %BOLD%  ============================================================%R%
+echo %BOLD%        STUDY ASSISTANT  --  Startup Launcher%R%
+echo %BOLD%  ============================================================%R%
+echo.
+
+:: ════════════════════════════════════════════════════════════════════════════
+::  1.  Python
+:: ════════════════════════════════════════════════════════════════════════════
+call :info "Checking Python..."
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    call :log ERROR "Python not found in PATH."
+if !errorlevel! neq 0 (
+    call :err "Python not found in PATH."
     echo.
-    echo   Install Python 3.10+ from https://www.python.org/downloads/
-    echo   Make sure to tick "Add Python to PATH".
+    echo   Install Python 3.10+: https://www.python.org/downloads/
+    echo   Tick [v] Add Python to PATH during setup.
     goto :fail
 )
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do set PY_VER=%%v
-call :log OK "Found %PY_VER%"
+:: tokens=2 grabs only "3.x.y" -- avoids trailing ^M carriage-return
+for /f "tokens=2" %%v in ('python --version 2^>^&1') do set "PY_NUM=%%v"
+call :ok "Python %PY_NUM% detected."
 
-:: ============================================================
-::  2. Activate virtual environment (if present)
-:: ============================================================
+:: ════════════════════════════════════════════════════════════════════════════
+::  2.  Activate virtual environment
+:: ════════════════════════════════════════════════════════════════════════════
 if exist ".venv\Scripts\activate.bat" (
-    call .venv\Scripts\activate.bat
-    call :log OK "Virtual environment (.venv) activated."
+    call ".venv\Scripts\activate.bat"
+    call :ok "Virtual environment activated."
 ) else (
-    call :log WARN "No .venv found -- using system Python."
-    echo         Run install-dependencies.bat to set up a proper environment.
+    call :warn "No .venv found -- using system Python."
+    echo         Run install-dependencies.bat first.
 )
 
-:: ============================================================
-::  3. Check core dependencies
-:: ============================================================
-call :log INFO "Verifying dependencies..."
+:: ════════════════════════════════════════════════════════════════════════════
+::  3.  Check / install dependencies
+:: ════════════════════════════════════════════════════════════════════════════
+call :info "Verifying dependencies..."
 python -c "import streamlit" >nul 2>&1
-if %errorlevel% neq 0 (
-    call :log WARN "Dependencies not installed. Launching installer now..."
+if !errorlevel! neq 0 (
+    call :warn "Streamlit not found -- launching installer..."
     echo.
     call "%~dp0install-dependencies.bat"
     if !errorlevel! neq 0 (
-        call :log ERROR "Installer failed. Cannot start."
+        call :err "Installer failed. Run install-dependencies.bat manually."
         goto :fail
     )
-    :: Re-activate venv after install
-    if exist ".venv\Scripts\activate.bat" call .venv\Scripts\activate.bat
+    if exist ".venv\Scripts\activate.bat" call ".venv\Scripts\activate.bat"
 )
 
 python -c "import streamlit, chromadb, ollama, fitz, sentence_transformers" >nul 2>&1
-if %errorlevel% neq 0 (
-    call :log ERROR "One or more required packages are missing even after install."
-    echo   Run install-dependencies.bat manually for details.
+if !errorlevel! neq 0 (
+    call :err "Required packages missing even after install."
+    echo   Run install-dependencies.bat manually to see what failed.
     goto :fail
 )
-call :log OK "All dependencies OK."
+call :ok "All dependencies verified."
 
-:: ============================================================
-::  4. Ensure Ollama is running
-:: ============================================================
-call :log INFO "Checking Ollama service..."
-
-powershell -NoProfile -Command "try { Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 3 -EA Stop | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
-if %errorlevel% == 0 (
-    call :log OK "Ollama is already running."
+:: ════════════════════════════════════════════════════════════════════════════
+::  4.  Ollama
+:: ════════════════════════════════════════════════════════════════════════════
+call :info "Checking Ollama..."
+powershell -NoProfile -Command ^
+  "try{Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 3 -EA Stop|Out-Null;exit 0}catch{exit 1}" >nul 2>&1
+if !errorlevel! == 0 (
+    call :ok "Ollama is running."
     goto :check_model
 )
 
-:: Not running -- try to start it
-call :log INFO "Ollama not running. Attempting to start..."
-
-:: Try common install paths on Windows
-set OLLAMA_EXE=
-where ollama >nul 2>&1 && set OLLAMA_EXE=ollama
-if "!OLLAMA_EXE!"=="" (
+:: Not running -- locate and start it
+call :info "Ollama not running. Attempting to start..."
+set "OLLAMA_EXE="
+where ollama >nul 2>&1
+if !errorlevel! == 0 set "OLLAMA_EXE=ollama"
+if not defined OLLAMA_EXE (
     if exist "%LOCALAPPDATA%\Programs\Ollama\ollama.exe" (
-        set OLLAMA_EXE=%LOCALAPPDATA%\Programs\Ollama\ollama.exe
+        set "OLLAMA_EXE=%LOCALAPPDATA%\Programs\Ollama\ollama.exe"
     )
 )
-if "!OLLAMA_EXE!"=="" (
+if not defined OLLAMA_EXE (
     if exist "%ProgramFiles%\Ollama\ollama.exe" (
-        set OLLAMA_EXE=%ProgramFiles%\Ollama\ollama.exe
+        set "OLLAMA_EXE=%ProgramFiles%\Ollama\ollama.exe"
     )
 )
 
-if "!OLLAMA_EXE!"=="" (
-    call :log WARN "Ollama executable not found."
-    echo         Install from https://ollama.com/download
-    echo         The app will start but LLM features will not work.
+if not defined OLLAMA_EXE (
+    call :warn "Ollama not found. Install: https://ollama.com/download"
+    echo         The app will start but LLM features need Ollama running.
     goto :find_port
 )
 
-start "" /B "!OLLAMA_EXE!" serve >nul 2>&1
-call :log INFO "Waiting for Ollama to initialise..."
+start "" /b "!OLLAMA_EXE!" serve >nul 2>&1
+call :info "Waiting for Ollama to start (up to 15s)..."
 
-:: Poll up to 15 s
-set /a _wait=0
+set "_w=0"
 :wait_ollama
 timeout /t 2 /nobreak >nul
-set /a _wait+=2
-powershell -NoProfile -Command "try { Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 2 -EA Stop | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
-if %errorlevel% == 0 (
-    call :log OK "Ollama started successfully."
+set /a "_w+=2"
+powershell -NoProfile -Command ^
+  "try{Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 2 -EA Stop|Out-Null;exit 0}catch{exit 1}" >nul 2>&1
+if !errorlevel! == 0 (
+    call :ok "Ollama started."
     goto :check_model
 )
-if !_wait! lss 15 goto :wait_ollama
-
-call :log WARN "Ollama did not respond within 15 s. Continuing anyway..."
+if !_w! lss 15 goto :wait_ollama
+call :warn "Ollama did not respond within 15s. Continuing anyway..."
 goto :find_port
 
+:: ════════════════════════════════════════════════════════════════════════════
+::  5.  Model check
+:: ════════════════════════════════════════════════════════════════════════════
 :check_model
-:: ============================================================
-::  5. Verify llama3.1:8b is pulled
-:: ============================================================
-call :log INFO "Checking for model llama3.1:8b..."
-powershell -NoProfile -Command "try { $r = Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 5 -EA Stop; if (($r.models | Where-Object { $_.name -like '*llama3.1*' }) ) { exit 0 } else { exit 1 } } catch { exit 2 }" >nul 2>&1
-if %errorlevel% == 0 (
-    call :log OK "Model llama3.1:8b is available."
-) else if %errorlevel% == 1 (
-    call :log WARN "Model llama3.1:8b is NOT pulled."
+powershell -NoProfile -Command ^
+  "try{$r=Invoke-RestMethod http://localhost:11434/api/tags -TimeoutSec 5 -EA Stop;if($r.models|Where-Object{$_.name -like '*llama3.1*'}){exit 0}else{exit 1}}catch{exit 2}" >nul 2>&1
+if !errorlevel! == 0 (
+    call :ok "Model llama3.1:8b is available."
+) else if !errorlevel! == 1 (
+    call :warn "Model llama3.1:8b is NOT pulled yet."
     echo.
-    echo   The app will launch but LLM answers will fail until you run:
-    echo       ollama pull llama3.1:8b
-    echo   (downloads ~4.7 GB -- run in a separate terminal)
+    echo   Run in a separate terminal:  ollama pull llama3.1:8b
+    echo   (~4.7 GB download -- app will work once the pull finishes)
     echo.
-    timeout /t 4 /nobreak >nul
+    timeout /t 3 /nobreak >nul
 ) else (
-    call :log WARN "Could not verify model list. Continuing..."
+    call :warn "Could not verify model -- continuing anyway."
 )
 
-:: ============================================================
-::  6. Find an available port (start at 8501, scan to 8600)
-:: ============================================================
+:: ════════════════════════════════════════════════════════════════════════════
+::  6.  Find free port  (8501 -> 8600)
+:: ════════════════════════════════════════════════════════════════════════════
 :find_port
-call :log INFO "Finding available port..."
-set PORT=8501
+call :info "Finding available port..."
+set "PORT=8501"
 
 :port_loop
 powershell -NoProfile -Command ^
-  "try { $l=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,%PORT%); $l.Start(); $l.Stop(); exit 0 } catch { exit 1 }" >nul 2>&1
-if %errorlevel% == 0 (
-    call :log OK "Port !PORT! is free."
+  "try{$l=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,!PORT!);$l.Start();$l.Stop();exit 0}catch{exit 1}" >nul 2>&1
+if !errorlevel! == 0 (
+    call :ok "Port !PORT! is free."
     goto :launch
 )
-call :log INFO "Port !PORT! is busy -- trying next..."
-set /a PORT+=1
+call :info "Port !PORT! is busy -- trying next..."
+set /a "PORT+=1"
 if !PORT! gtr 8600 (
-    call :log ERROR "No free port found in range 8501-8600."
+    call :err "No free port found in range 8501-8600."
     goto :fail
 )
 goto :port_loop
 
-:: ============================================================
-::  7. Launch Streamlit
-:: ============================================================
+:: ════════════════════════════════════════════════════════════════════════════
+::  7.  Launch
+:: ════════════════════════════════════════════════════════════════════════════
 :launch
 echo.
-echo  ==========================================================
-echo   Launching Study Assistant
-echo   URL : http://localhost:!PORT!
-echo  ==========================================================
+echo %BOLD%  ============================================================%R%
+echo %GREEN%%BOLD%   Launching Study Assistant%R%
+echo   URL: http://localhost:!PORT!
+echo %BOLD%  ============================================================%R%
 echo.
 
-:: Open browser after a short delay (Streamlit needs a moment)
-powershell -NoProfile -Command "Start-Sleep 3; Start-Process 'http://localhost:!PORT!'" >nul 2>&1 &
+:: Open browser in BACKGROUND after 3s so Streamlit starts first.
+:: "start /b" detaches the process -- no blocking, no sequential &-trick.
+start /b "" powershell -NoProfile -WindowStyle Hidden ^
+  -Command "Start-Sleep 3; Start-Process 'http://localhost:!PORT!'"
 
 streamlit run app.py ^
     --server.port !PORT! ^
     --server.headless true ^
     --browser.gatherUsageStats false
 
-:: If Streamlit exits (user closed it), pause so window stays open
 echo.
-call :log INFO "Streamlit has exited."
-pause
-exit /b 0
+call :info "Streamlit exited."
+goto :end
 
-:: ============================================================
-::  Failure handler
-:: ============================================================
+:: ════════════════════════════════════════════════════════════════════════════
+::  Exit paths
+:: ════════════════════════════════════════════════════════════════════════════
 :fail
 echo.
-echo  ==========================================================
-echo   Startup FAILED. See messages above.
-echo  ==========================================================
+echo %BOLD%  ============================================================%R%
+echo %RED%%BOLD%   STARTUP FAILED. See messages above.%R%
+echo %BOLD%  ============================================================%R%
 echo.
-pause
-exit /b 1
 
-:: ============================================================
-::  Helpers
-:: ============================================================
-:print_header
-cls
-echo  ==========================================================
-echo.
-echo           STUDY ASSISTANT -- Startup Launcher
-echo.
-echo  ==========================================================
-echo.
+:end
+echo Press any key to close this window...
+pause >nul
+exit /b
+
+:: ════════════════════════════════════════════════════════════════════════════
+::  Subroutines
+:: ════════════════════════════════════════════════════════════════════════════
+:ok
+echo %GREEN%  [ OK    ]%R% %~1
 goto :eof
 
-:log
-set "_lvl=%~1"
-set "_msg=%~2"
-if /i "%_lvl%"=="OK"    powershell -NoProfile -Command "Write-Host '  [ OK    ] ' -NoNewline -ForegroundColor Green;  Write-Host '%_msg%'"
-if /i "%_lvl%"=="INFO"  powershell -NoProfile -Command "Write-Host '  [ INFO  ] ' -NoNewline -ForegroundColor Cyan;   Write-Host '%_msg%'"
-if /i "%_lvl%"=="WARN"  powershell -NoProfile -Command "Write-Host '  [ WARN  ] ' -NoNewline -ForegroundColor Yellow; Write-Host '%_msg%'"
-if /i "%_lvl%"=="ERROR" powershell -NoProfile -Command "Write-Host '  [ ERROR ] ' -NoNewline -ForegroundColor Red;    Write-Host '%_msg%'"
+:info
+echo %CYAN%  [ INFO  ]%R% %~1
+goto :eof
+
+:warn
+echo %YELLOW%  [ WARN  ]%R% %~1
+goto :eof
+
+:err
+echo %RED%  [ ERROR ]%R% %~1
 goto :eof
